@@ -9,6 +9,7 @@
 #include <netdb.h>
 #include <errno.h>
 #include <time.h>
+#include <signal.h>
 
 #define ONCE_READ	(1024 * 100)
 
@@ -525,6 +526,7 @@ static void acpt(struct web_serv *self)
 	pid_t pid;
 	struct request *req = NULL;
 	struct content *ctx = NULL;
+	signal(SIGCHLD, SIG_IGN);	// 子进程退出后，直接推给init进程为它收尸
 	while (1) {
 		clen = sizeof(caddr);
 		csockfd = accept(self->privates->sockfd, (struct sockaddr *) &caddr, &clen);
