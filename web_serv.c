@@ -111,6 +111,10 @@ static int create_head(int sockfd,
 	int n;
 	char *msg;
 	msg = (char *) malloc(ONCE_READ * mul);
+	if (msg == NULL) {
+		DEBUGERR("malloc msg failed. give up\n");
+		return -1;
+	}
 	while ((n = read(sockfd, buf, 1)) > 0) {	// 读完空行后停止
 		len += n;
 		if (len >= ONCE_READ * mul) {
@@ -220,6 +224,7 @@ static int parseline_request(char *pbuf, unsigned int *len, void **res)
 	 * GET /admin_ui/rdx/core/images/close.png HTTP/1.1
 	 */
 	unsigned int i = 0;
+	unsigned int catcnt;
 	struct request *res_t;
 	*res = new_request();
 	if (*res == NULL) {
@@ -227,7 +232,12 @@ static int parseline_request(char *pbuf, unsigned int *len, void **res)
 		return -1;
 	}
 	res_t = (struct request *) *res;
-	for (; i < *len && *pbuf != ' '; ++pbuf, ++i) {
+	for (catcnt = 0; i < *len && *pbuf != ' '; ++pbuf, ++i, ++catcnt) {
+		if (catcnt >= sizeof(res_t->method) - 1) {		// -1 是因为最后要结束符 '\0'
+			DEBUGERR("strncat too long. give up\n");
+			delete_request(res_t);
+			return 1;
+		}
 		strncat(res_t->method, pbuf, 1);
 	}
 	if (i >= *len) {
@@ -245,7 +255,12 @@ static int parseline_request(char *pbuf, unsigned int *len, void **res)
 	}
 	memset(res_t->url, 0, *len);
 	res_t->urlsize = *len;
-	for (; i < *len && *pbuf != ' '; ++pbuf, ++i) {
+	for (catcnt = 0; i < *len && *pbuf != ' '; ++pbuf, ++i, ++catcnt) {
+		if (catcnt >= res_t->urlsize - 1) {
+			DEBUGERR("strncat too long. give up\n");
+			delete_request(res_t);
+			return 1;
+		}
 		strncat(res_t->url, pbuf, 1);
 	}
 	if (i >= *len) {
@@ -255,7 +270,12 @@ static int parseline_request(char *pbuf, unsigned int *len, void **res)
 	}
 	++pbuf;
 	++i;
-	for (; i < *len && *pbuf != '\r' && *pbuf != '\n' && *pbuf != '\0'; ++pbuf, ++i) {
+	for (catcnt = 0; i < *len && *pbuf != '\r' && *pbuf != '\n' && *pbuf != '\0'; ++pbuf, ++i, ++catcnt) {
+		if (catcnt >= sizeof(res_t->httpver) - 1) {
+			DEBUGERR("strncat too long. give up\n");
+			delete_request(res_t);
+			return 1;
+		}
 		strncat(res_t->httpver, pbuf, 1);
 	}
 	if (i >= *len) {
@@ -276,6 +296,7 @@ static int parseline_response(char *pbuf, unsigned int *len, void **res)
 	 * HTTP/1.0 200 OK
 	 */
 	unsigned int i = 0;
+	unsigned int catcnt;
 	struct response *res_t;
 	*res = new_response();
 	if (*res == NULL) {
@@ -283,7 +304,12 @@ static int parseline_response(char *pbuf, unsigned int *len, void **res)
 		return -1;
 	}
 	res_t = (struct response *) *res;
-	for (; i < *len && *pbuf != ' '; ++pbuf, ++i) {
+	for (catcnt = 0; i < *len && *pbuf != ' '; ++pbuf, ++i, ++catcnt) {
+		if (catcnt >= sizeof(res_t->httpver) - 1) {
+			DEBUGERR("strncat too long. give up\n");
+			delete_response(res_t);
+			return 1;
+		}
 		strncat(res_t->httpver, pbuf, 1);
 	}
 	if (i >= *len) {
@@ -293,7 +319,12 @@ static int parseline_response(char *pbuf, unsigned int *len, void **res)
 	}
 	++pbuf;
 	++i;
-	for (; i < *len && *pbuf != ' '; ++pbuf, ++i) {
+	for (catcnt = 0; i < *len && *pbuf != ' '; ++pbuf, ++i, ++catcnt) {
+		if (catcnt >= 10) {	// int 的极限
+			DEBUGERR("response too big. give up\n");
+			delete_response(res_t);
+			return 1;
+		}
 		res_t->code *= 10;
 		res_t->code += pbuf[0] - '0';
 	}
@@ -304,7 +335,12 @@ static int parseline_response(char *pbuf, unsigned int *len, void **res)
 	}
 	++pbuf;
 	++i;
-	for (; i < *len && *pbuf != '\r' && *pbuf != '\n' && *pbuf != '\0'; ++pbuf, ++i) {
+	for (catcnt = 0; i < *len && *pbuf != '\r' && *pbuf != '\n' && *pbuf != '\0'; ++pbuf, ++i, ++catcnt) {
+		if (catcnt >= sizeof(res_t->status) - 1) {
+			DEBUGERR("strncat too long. give up\n");
+			delete_response(res_t);
+			return 1;
+		}
 		strncat(res_t->status, pbuf, 1);
 	}
 	if (i >= *len) {
@@ -336,8 +372,17 @@ static int parseheader(char *pbuf, unsigned int *len, cJSON *header)
 		return 0;
 	}
 	key = (char *) malloc(*len);
+	if (key == NULL) {
+		DEBUGERR("malloc key failed. give up\n");
+		return -1;
+	}
 	memset(key, 0, *len);
 	value = (char *) malloc(*len);
+	if (value == NULL) {
+		DEBUGERR("malloc value failed. give up\n");
+		free(key);
+		return -1;
+	}
 	memset(value, 0, *len);
 	for (; i < *len && *pbuf != ':'; ++pbuf, ++i) {	// 读取键
 		// if (*pbuf >= 'A' && *pbuf <= 'Z') {	// 转小写
@@ -687,6 +732,10 @@ void default_tamp2client(struct content *ctx)
 struct web_serv *new_web_serv()
 {
 	struct web_serv_t *privates = (struct web_serv_t *) malloc(sizeof(struct web_serv_t));
+	if (privates == NULL) {
+		DEBUGERR("malloc privates failed. give up\n");
+		return NULL;
+	}
 	privates->sockfd = -1;
 	struct web_serv ret_t = {
 		.domain = AF_INET,
@@ -704,6 +753,7 @@ struct web_serv *new_web_serv()
 	struct web_serv *ret = (struct web_serv *) malloc(sizeof(struct web_serv));
 	if (!ret) {
 		DEBUGERR("malloc failed. give up\n");
+		free(privates);
 		return NULL;
 	}
 	memcpy(ret, &ret_t, sizeof(struct web_serv));

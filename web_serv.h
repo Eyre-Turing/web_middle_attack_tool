@@ -12,14 +12,18 @@
 #include <pthread.h> 
 #include "cJSON.h"
 
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 // 请求
 struct request
 {
-	char method[8];	// 请求方法，如：GET POST PUT 等
+	char method[16];	// 请求方法，如：GET POST PUT 等
 	char *url;		// 到被代理服务器的url参数，如：/index /#/ 等
 	unsigned int urlsize;	// url 使用的储存空间大小，如果要篡改 url 内容，要看看新 url 的长度是否小于 urlsize（等于也不行，因为有\0）
 					// 如果新url长度不小于urlsize，则要自行 realloc（总之，旧的空间要清理掉，否则内存泄露）
-	char httpver[16];	// 协议版本，如：HTTP/1.1 等
+	char httpver[32];	// 协议版本，如：HTTP/1.1 等
 	
 	cJSON *header;	// 请求头，如：Content-Length Content-Type 等（由于cJSON支持键不区分大小写匹配，所以不转换大小写）
 };
@@ -27,9 +31,9 @@ struct request
 // 响应
 struct response
 {
-	char httpver[16];	// 协议版本
+	char httpver[32];	// 协议版本
 	int code;		// 状态码，如：200 等
-	char status[8];	// 状态，如：ok 等
+	char status[64];	// 状态，如：ok 等
 	
 	cJSON *header;	// 响应头
 };
@@ -80,4 +84,7 @@ struct web_serv *new_web_serv();	// 构造 web_serv 对象
 void default_tamp2real(struct content *ctx);
 void default_tamp2client(struct content *ctx);
 
+#ifdef __cplusplus
+}
+#endif
 #endif
