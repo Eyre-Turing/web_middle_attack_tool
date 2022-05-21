@@ -49,6 +49,13 @@ struct content
 	
 	int csockfd;	// 和客户端通信的套接字
 	int ssockfd;	// 和服务端通信的套接字，在send_reqhead前为 -1
+
+	struct {
+		char host[128];			// 真正的服务端的地址（ip或域名），可在send_reqhead前修改此字端达到给其他服务端发请求的效果
+		unsigned short hostport;		// 真正的服务端的端口，可在send_reqhead前修改此字端达到给其他服务端发请求的效果
+		char client[128];			// 真正的客户端的地址，只能看看，修改没影响
+		unsigned short clientport;	// 真正的客户端的端口，只能看看，修改没影响
+	} addr;
 	
 	pthread_t (*send_reqhead)(struct content *self);	// 发送请求头给服务端，这个函数执行后将创建响应
 	void (*send_reshead)(struct content *self);	// 发送响应头给客户端
@@ -63,7 +70,7 @@ struct web_serv
 	unsigned short port;	// 监听的端口，如：80
 	int backlog;
 
-	char realhost[64];	// 真正的服务端（ip或域名）
+	char realhost[128];	// 真正的服务端（ip或域名）
 	unsigned short realport;	// 真正的服务器端口
 
 	struct web_serv_t *privates;	// 私有变量，这样写的作用是隐藏起来，不让用户直接操作

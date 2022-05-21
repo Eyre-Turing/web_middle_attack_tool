@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <time.h>
 #include <signal.h>
+#include <arpa/inet.h>
 
 #define ONCE_READ	(1024 * 100)
 
@@ -61,8 +62,8 @@ static int request_create(struct content *ctx)
 		.ai_family = web->domain
 	};
 	struct addrinfo *addr;
-	sprintf(port, "%d", web->realport);
-	if (getaddrinfo(web->realhost, port, &hints, &addr)) {
+	sprintf(port, "%d", ctx->addr.hostport);
+	if (getaddrinfo(ctx->addr.host, port, &hints, &addr)) {
 		// 无法获取真正的服务器地址
 		DEBUGERR("can not getaddrinfo. give up: %s\n", strerror(errno));
 		return 1;	// 放弃这个包
@@ -581,14 +582,17 @@ static void acpt(struct web_serv *self)
 			DEBUGINFO("client connected, message relay start\n");
 			close(self->privates->sockfd);	// 关闭服务端套接字句柄，子进程只处理请求，无需监听
 			if (create_head(csockfd, parseline_request, parseheader_request, &req)) {	// 解析请求头
+				DEBUGERR("create_head failed. give up\n");
 				close(csockfd);
 				_exit(1);
 			}
 			ctx = (struct content *) malloc(sizeof(struct content));
 			if (ctx == NULL) {
+				DEBUGERR("malloc failed. give up\n");
 				close(csockfd);
 				_exit(-1);
 			}
+
 			ctx->web = self;
 			ctx->csockfd = csockfd;
 			ctx->ssockfd = -1;	// 开始先置空，因为刚开始还没有勾搭上真正的服务端
@@ -596,6 +600,16 @@ static void acpt(struct web_serv *self)
 			ctx->res = NULL;	// 开始先置空，因为刚开始还没有勾搭上真正的服务端，更没有响应数据
 			ctx->send_reqhead = content_send_reqhead;
 			ctx->send_reshead = content_send_reshead;
+
+			strcpy(ctx->addr.host, self->realhost);
+			ctx->addr.hostport = self->realport;
+			strcpy(ctx->addr.client, inet_ntoa(caddr.sin_addr));
+			ctx->addr.clientport = caddr.sin_port;
+			DEBUGINFO("[message addrinfo] host       = %s\n", ctx->addr.host);
+			DEBUGINFO("[message addrinfo] hostport   = %u\n", ctx->addr.hostport);
+			DEBUGINFO("[message addrinfo] client     = %s\n", ctx->addr.client);
+			DEBUGINFO("[message addrinfo] clientport = %u\n", ctx->addr.clientport);
+
 			self->tamp2real(ctx);	// 篡改，并且发送信息
 			delete_request(ctx->req);
 			delete_response(ctx->res);
@@ -663,14 +677,24 @@ void default_tamp2real(struct content *ctx)
 		.tv_sec = 1,
 		.tv_usec = 0
 	};
+	cJSON *item;
+
 	// 修改 ctx->req->header 即可篡改请求头，下面举个例子，但是我没打算改这些，所以注释掉了
-	// cJSON *item;
 	// item = cJSON_GetObjectItem(ctx->req->header, "host");	// cJSON是可以不区分大小写获取的，所以host和Host效果是一样的
 	// if (item) {
 	// 	item = NULL;
 	// 	cJSON_DeleteItemFromObject(ctx->req->header, "host");
 	// 	cJSON_AddStringToObject(ctx->req->header, "Host", self->realhost);	// 篡改请求头Host为真服务器的ip
 	// }
+	if (strcmp(ctx->addr.host, "") == 0) {
+		// 如果目标服务器IP地址为空，则根据请求头Host字端的值设置服务器IP
+		item = cJSON_GetObjectItem(ctx->req->header, "host");
+		if (item == NULL) {
+			DEBUGERR("unknow server\'s ip addr. give up\n");
+			return ;
+		}
+		strcpy(ctx->addr.host, item->valuestring);
+	}
 	resp_thr = ctx->send_reqhead(ctx);	// 在这行代码执行完之后，服务端给客户端发送消息的线程就会启动，self->tamp2client 就开始执行了
 
 	// 下面把请求体内容都发给服务端，下面代码都这么明示了，要篡改请求体知道怎么篡改了吧（笑）
