@@ -10,6 +10,7 @@
  */
 
 #include <pthread.h> 
+#include <openssl/ssl.h>
 #include "cJSON.h"
 
 #ifdef __cplusplus
@@ -53,10 +54,13 @@ struct content
 	struct {
 		char host[128];			// 真正的服务端的地址（ip或域名），可在send_reqhead前修改此字端达到给其他服务端发请求的效果
 		unsigned short hostport;		// 真正的服务端的端口，可在send_reqhead前修改此字端达到给其他服务端发请求的效果
-		char client[128];			// 真正的客户端的地址，只能看看，修改没影响
+		char client[128];			// 真正的客户端OPENSSL_init_ssl的地址，只能看看，修改没影响
 		unsigned short clientport;	// 真正的客户端的端口，只能看看，修改没影响
 	} addr;
-	
+
+	SSL *cssl;	// 不启用ssl则为空，与客户端发信息的ssl，所以本身是以服务端的姿态使用的
+	SSL *sssl;	// 不启用ssl则为空，与服务端发信息的ssl，所以本身是以客户端的姿态使用的
+
 	pthread_t (*send_reqhead)(struct content *self);	// 发送请求头给服务端，这个函数执行后将创建响应
 	void (*send_reshead)(struct content *self);	// 发送响应头给客户端
 };
@@ -69,6 +73,10 @@ struct web_serv
 	unsigned int host;	// 监听的主机，即允许访问的IP，如：htonl(INADDR_ANY)
 	unsigned short port;	// 监听的端口，如：80
 	int backlog;
+
+	int sslenable;	// 是否使用https，0表示不使用，非0表示使用
+	char cacert[260];	// 证书文件名
+	char privkey[260];	// 私钥文件名
 
 	char realhost[128];	// 真正的服务端（ip或域名）
 	unsigned short realport;	// 真正的服务器端口
@@ -86,6 +94,10 @@ struct web_serv
 };
 
 struct web_serv *new_web_serv();	// 构造 web_serv 对象
+
+int sread(int sockfd, SSL *ssl, void *buf, size_t nbytes);
+int srecv(int sockfd, SSL *ssl, void *buf, size_t nbytes);
+int swrite(int sockfd, SSL *ssl, const void *buf, size_t nbytes);
 
 // 默认的篡改并发送函数，即不做任何修改原封不动发送
 void default_tamp2real(struct content *ctx);

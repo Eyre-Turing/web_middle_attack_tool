@@ -11,6 +11,7 @@
 #include <time.h>
 #include <signal.h>
 #include <arpa/inet.h>
+#include <openssl/err.h>
 
 #define ONCE_READ	(1024 * 100)
 
@@ -50,6 +51,8 @@ struct web_serv_t
 {
 	int sockfd;
 	struct sockaddr_in addr;
+	SSL_CTX *csslctx;	// 和客户端连接的ssl上下文，不启用ssl则为NULL
+	SSL_CTX *ssslctx;	// 和服务端连接的ssl上下文，不启用ssl则为NULL
 };
 
 // 创建到真正的服务器的连接，成功则返回0
@@ -80,6 +83,7 @@ static int request_create(struct content *ctx)
 	}
 	if (connect(ctx->ssockfd, addr->ai_addr, addr->ai_addrlen) < 0) {
 		close(ctx->ssockfd);
+		ctx->ssockfd = -1;
 		if (addr) {
 			freeaddrinfo(addr);
 			addr = NULL;
@@ -88,7 +92,47 @@ static int request_create(struct content *ctx)
 		return 3;
 	}
 	freeaddrinfo(addr);
+
+	// ssl部分，这时是发给服务端信息，所以创建作为客户端的sssl即可
+	if (ctx->web->sslenable) {
+		ctx->sssl = SSL_new(ctx->web->privates->ssslctx);
+		SSL_set_fd(ctx->sssl, ctx->ssockfd);
+		if (SSL_connect(ctx->sssl) < 0) {
+			SSL_shutdown(ctx->sssl);
+			SSL_free(ctx->sssl);
+			ctx->sssl = NULL;
+			close(ctx->ssockfd);
+			ctx->ssockfd = -1;
+			DEBUGERR("can not use ssl. give up: %s\n", strerror(errno));
+			return 4;
+		}
+	}
+
 	return 0;
+}
+
+int sread(int sockfd, SSL *ssl, void *buf, size_t nbytes)
+{
+	if (ssl) {
+		return SSL_read(ssl, buf, nbytes);
+	}
+	return read(sockfd, buf, nbytes);
+}
+
+int srecv(int sockfd, SSL *ssl, void *buf, size_t nbytes)
+{
+	if (ssl) {
+		return SSL_read(ssl, buf, nbytes);
+	}
+	return recv(sockfd, buf, nbytes, 0);
+}
+
+int swrite(int sockfd, SSL *ssl, const void *buf, size_t nbytes)
+{
+	if (ssl) {
+		return SSL_write(ssl, buf, nbytes);
+	}
+	return write(sockfd, buf, nbytes);
 }
 
 // 读请求（或响应）头，并且解析成结构体，成功返回0，失败返回非0值
@@ -96,10 +140,12 @@ static int request_create(struct content *ctx)
 // parseline 是解析请求行（或响应行），请求行和响应行的解析方式不一样，所以用一个回调，回调的第3个参数为返回，因为要分配空间，所有为二级指针
 // parseheader 是解析请求头（或响应头），第3个参数为返回，因为直接使用 parseline 分配的空间，所以一级指针即可
 // parseline 和 parseheader 返回0时表示能正常解析，返回非0值表示解析失败
+// 如果 ssl 参数不为 NULL 则表示使用ssl，并且这个参数就是这个 ssl 的句柄
 static int create_head(int sockfd,
 				int (*parseline)(char *pbuf, unsigned int *len, void **res),
 				int (*parseheader)(char *pbuf, unsigned int *len, void *res),
-				void **res)
+				void **res,
+				SSL *ssl)
 {
 	char buf[1];
 	char *nptr;
@@ -116,7 +162,7 @@ static int create_head(int sockfd,
 		DEBUGERR("malloc msg failed. give up\n");
 		return -1;
 	}
-	while ((n = read(sockfd, buf, 1)) > 0) {	// 读完空行后停止
+	while ((n = sread(sockfd, ssl, buf, 1)) > 0) {	// 读完空行后停止
 		len += n;
 		if (len >= ONCE_READ * mul) {
 			++mul;
@@ -518,7 +564,7 @@ static pthread_t content_send_reqhead(struct content *self)
 
 	DEBUGINFO("send head message\n");
 
-	write(self->ssockfd, head_msg, head_msg_len);
+	swrite(self->ssockfd, self->sssl, head_msg, head_msg_len);
 
 	free(head_msg);
 
@@ -539,13 +585,13 @@ static void content_send_reshead(struct content *self)
 	DEBUGINFO("%s %d %s\n", self->res->httpver, self->res->code, self->res->status);
 
 	// 发送响应行
-	write(self->csockfd, self->res->httpver, strlen(self->res->httpver));
-	write(self->csockfd, " ", 1);
+	swrite(self->csockfd, self->cssl, self->res->httpver, strlen(self->res->httpver));
+	swrite(self->csockfd, self->cssl, " ", 1);
 	sprintf(codestr, "%d", self->res->code);
-	write(self->csockfd, codestr, strlen(codestr));
-	write(self->csockfd, " ", 1);
-	write(self->csockfd, self->res->status, strlen(self->res->status));
-	write(self->csockfd, "\r\n", 2);
+	swrite(self->csockfd, self->cssl, codestr, strlen(codestr));
+	swrite(self->csockfd, self->cssl, " ", 1);
+	swrite(self->csockfd, self->cssl, self->res->status, strlen(self->res->status));
+	swrite(self->csockfd, self->cssl, "\r\n", 2);
 
 	DEBUGINFO("send response header\n");
 
@@ -553,15 +599,15 @@ static void content_send_reshead(struct content *self)
 	for (i = 0; i < cJSON_GetArraySize(self->res->header); ++i) {
 		item = cJSON_GetArrayItem(self->res->header, i);
 		DEBUGINFO("header.%s = %s\n", item->string, item->valuestring);
-		write(self->csockfd, item->string, strlen(item->string));
-		write(self->csockfd, ": ", 2);
-		write(self->csockfd, item->valuestring, strlen(item->valuestring));
-		write(self->csockfd, "\r\n", 2);
+		swrite(self->csockfd, self->cssl, item->string, strlen(item->string));
+		swrite(self->csockfd, self->cssl, ": ", 2);
+		swrite(self->csockfd, self->cssl, item->valuestring, strlen(item->valuestring));
+		swrite(self->csockfd, self->cssl, "\r\n", 2);
 	}
 
 	DEBUGINFO("send empty line\n");
 
-	write(self->csockfd, "\r\n", 2);	// 发送空行
+	swrite(self->csockfd, self->cssl, "\r\n", 2);	// 发送空行
 }
 
 static void acpt(struct web_serv *self)
@@ -581,11 +627,6 @@ static void acpt(struct web_serv *self)
 		} else {
 			DEBUGINFO("client connected, message relay start\n");
 			close(self->privates->sockfd);	// 关闭服务端套接字句柄，子进程只处理请求，无需监听
-			if (create_head(csockfd, parseline_request, parseheader_request, &req)) {	// 解析请求头
-				DEBUGERR("create_head failed. give up\n");
-				close(csockfd);
-				_exit(1);
-			}
 			ctx = (struct content *) malloc(sizeof(struct content));
 			if (ctx == NULL) {
 				DEBUGERR("malloc failed. give up\n");
@@ -593,6 +634,44 @@ static void acpt(struct web_serv *self)
 				_exit(-1);
 			}
 
+			ctx->cssl = NULL;
+			ctx->sssl = NULL;
+
+			// ssl部分，构造和客户端通信的作为服务端的cssl
+			if (self->sslenable) {
+				int ret;
+				DEBUGINFO("create to-client ssl\n");
+				ctx->cssl = SSL_new(self->privates->csslctx);
+				DEBUGINFO("set to-client socket to ssl\n");
+				SSL_set_fd(ctx->cssl, csockfd);
+				DEBUGINFO("SSL_accept\n");
+				while ((ret = SSL_accept(ctx->cssl)) < 0) {
+					int err = SSL_get_error(ctx->cssl, ret);
+					DEBUGINFO("SSL_accept ret: %d, err: %d\n", ret, err);
+					if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+						DEBUGINFO("wait to SSL_accept\n");
+						continue;
+					} else if (err == SSL_ERROR_SYSCALL || err == SSL_ERROR_SSL || err == SSL_ERROR_ZERO_RETURN) {
+						DEBUGERR("SSL_accept failed. give up\n");
+					} else {
+						DEBUGINFO("no error\n");
+						break;
+					}
+					SSL_shutdown(ctx->cssl);
+					SSL_free(ctx->cssl);
+					close(csockfd);
+					free(ctx);
+					_exit(2);
+				}
+				DEBUGINFO("to-client ssl set ok\n");
+			}
+
+			if (create_head(csockfd, parseline_request, parseheader_request, &req, ctx->cssl)) {	// 解析请求头
+				DEBUGERR("create_head failed. give up\n");
+				close(csockfd);
+				_exit(1);
+			}
+			
 			ctx->web = self;
 			ctx->csockfd = csockfd;
 			ctx->ssockfd = -1;	// 开始先置空，因为刚开始还没有勾搭上真正的服务端
@@ -609,14 +688,23 @@ static void acpt(struct web_serv *self)
 			DEBUGINFO("[message addrinfo] hostport   = %u\n", ctx->addr.hostport);
 			DEBUGINFO("[message addrinfo] client     = %s\n", ctx->addr.client);
 			DEBUGINFO("[message addrinfo] clientport = %u\n", ctx->addr.clientport);
-
+			
 			self->tamp2real(ctx);	// 篡改，并且发送信息
 			delete_request(ctx->req);
 			delete_response(ctx->res);
 			close(csockfd);
+			if (ctx->cssl) {
+				SSL_shutdown(ctx->cssl);
+				SSL_free(ctx->cssl);
+			}
 			if (ctx->ssockfd >= 0) {
 				close(ctx->ssockfd);
 			}
+			if (ctx->sssl) {
+				SSL_shutdown(ctx->sssl);
+				SSL_free(ctx->sssl);
+			}
+			free(ctx);
 			DEBUGINFO("end of message relay\n");
 			_exit(0);
 		}
@@ -640,6 +728,35 @@ static int web_serv_run(struct web_serv *self)
 		self->privates->sockfd = -1;
 		return ret;
 	}
+	if (self->sslenable) {	// 启用ssl
+		SSL_library_init();	// 初始化ssl
+        OpenSSL_add_all_algorithms();	// 添加ssl所有算法
+        SSL_load_error_strings();
+		self->privates->csslctx = SSL_CTX_new(SSLv23_server_method());	// csslctx和客户端通信，所以自己是作为服务端，使用服务端的协议
+		if (self->privates->csslctx == NULL) {
+			ERR_print_errors_fp(stderr);
+			return 1;
+		}
+		self->privates->ssslctx = SSL_CTX_new(SSLv23_client_method());	// ssslctx和服务端通信，所以自己是作为客户端，使用客户端的协议
+		if (self->privates->ssslctx == NULL) {
+			ERR_print_errors_fp(stderr);
+			return 1;
+		}
+		DEBUGINFO("cacert: %s\n", self->cacert);
+		if (SSL_CTX_use_certificate_file(self->privates->csslctx, self->cacert, SSL_FILETYPE_PEM) <= 0) {	// 加载证书
+			ERR_print_errors_fp(stderr);
+			return 2;
+		}
+		DEBUGINFO("privkey: %s\n", self->privkey);
+		if (SSL_CTX_use_PrivateKey_file(self->privates->csslctx, self->privkey, SSL_FILETYPE_PEM) <= 0) {	// 加载密钥
+			ERR_print_errors_fp(stderr);
+			return 2;
+		}
+		if (!SSL_CTX_check_private_key(self->privates->csslctx)) {	// 验证密钥
+			ERR_print_errors_fp(stderr);
+			return 2;
+		}
+	}
 	if (ret = listen(self->privates->sockfd, self->backlog)) {
 		DEBUGERR("listen failed: %s\n", strerror(errno));
 		close(self->privates->sockfd);
@@ -657,6 +774,8 @@ static void delete_web_serv(struct web_serv *self)
 		close(self->privates->sockfd);
 		self->privates->sockfd = -1;
 	}
+	SSL_CTX_free(self->privates->csslctx);
+	SSL_CTX_free(self->privates->ssslctx);
 	free(self->privates);
 	free(self);
 }
@@ -699,7 +818,7 @@ void default_tamp2real(struct content *ctx)
 
 	// 下面把请求体内容都发给服务端，下面代码都这么明示了，要篡改请求体知道怎么篡改了吧（笑）
 	setsockopt(ctx->csockfd, SOL_SOCKET, SO_RCVTIMEO, &tv_timeout, sizeof(tv_timeout));
-	while ((n = recv(ctx->csockfd, buf, ONCE_READ, 0)) != 0) {
+	while ((n = /*recv(ctx->csockfd, buf, ONCE_READ, 0)*/ srecv(ctx->csockfd, ctx->cssl, buf, ONCE_READ)) != 0) {
 		if (n < 0) {
 			if (errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN) {	// 超时
 				n = recv(ctx->ssockfd, buf, ONCE_READ, MSG_PEEK);	// 判断中继对端是否断开
@@ -711,7 +830,7 @@ void default_tamp2real(struct content *ctx)
 			break;	// 对端异常
 		}
 		buf[n] = '\0';
-		write(ctx->ssockfd, buf, n);
+		swrite(ctx->ssockfd, ctx->sssl, buf, n);
 	}
 
 	pthread_join(resp_thr, NULL);	// 等待响应结束，不等待的话，发完请求本进程就 gg 了
@@ -728,7 +847,7 @@ void default_tamp2client(struct content *ctx)
 		.tv_usec = 0
 	};
 
-	if (create_head(ctx->ssockfd, parseline_response, parseheader_response, &(ctx->res))) {	// 获取响应头
+	if (create_head(ctx->ssockfd, parseline_response, parseheader_response, &(ctx->res), ctx->sssl)) {	// 获取响应头
 		return ;
 	}
 
@@ -737,7 +856,7 @@ void default_tamp2client(struct content *ctx)
 
 	// 发送响应体
 	setsockopt(ctx->ssockfd, SOL_SOCKET, SO_RCVTIMEO, &tv_timeout, sizeof(tv_timeout));
-	while ((n = recv(ctx->ssockfd, buf, ONCE_READ, 0)) != 0) {
+	while ((n = /*recv(ctx->ssockfd, buf, ONCE_READ, 0)*/ srecv(ctx->ssockfd, ctx->sssl, buf, ONCE_READ)) != 0) {
 		if (n < 0) {
 			if (errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN) {	// 超时
 				n = recv(ctx->csockfd, buf, ONCE_READ, MSG_PEEK);	// 判断中继对端是否断开
@@ -749,7 +868,7 @@ void default_tamp2client(struct content *ctx)
 			break;	// 对端异常
 		}
 		buf[n] = '\0';
-		write(ctx->csockfd, buf, n);
+		swrite(ctx->csockfd, ctx->cssl, buf, n);
 	}
 }
 
@@ -761,11 +880,16 @@ struct web_serv *new_web_serv()
 		return NULL;
 	}
 	privates->sockfd = -1;
+	privates->csslctx = NULL;
+	privates->ssslctx = NULL;
 	struct web_serv ret_t = {
 		.domain = AF_INET,
 		.host = htonl(INADDR_ANY),
 		.port = 80,
 		.backlog = 5,
+		.sslenable = 0,
+		.cacert = "",
+		.privkey = "",
 		.realhost = "",
 		.realport = 0,
 		.privates = privates,

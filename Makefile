@@ -1,12 +1,12 @@
 TARGET = main
 OBJECTS = $(patsubst %.c, %.o, $(wildcard *.c))
-LDFLAG = -lpthread -lm
+LDFLAG = -lpthread -lm -lssl -lcrypto
 
 ${TARGET}: ${OBJECTS}
-	gcc $^ -o $@ ${LDFLAG}
+	gcc -g $^ -o $@ ${LDFLAG}
 
 %.o: %.c
-	gcc -c $< -o $@
+	gcc -g -c $< -o $@
 
 .PHONY: clean
 
